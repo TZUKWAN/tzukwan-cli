@@ -1,5 +1,5 @@
 {
-  "name": "tzukwan",
+  "name": "@tzukwan/cli",
   "version": "1.0.0",
   "description": "Tzukwan - Open-source AI CLI agent for academic research. Supports any OpenAI-compatible LLM provider.",
   "private": false,
