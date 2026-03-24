@@ -1,0 +1,43 @@
+{
+  "name": "tzukwan-cli",
+  "version": "1.0.0",
+  "description": "Tzukwan - Open-source AI CLI agent for academic research. Supports any OpenAI-compatible LLM provider.",
+  "private": false,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "bin": {
+    "tzukwan": "./bin/tzukwan.mjs"
+  },
+  "scripts": {
+    "build": "npm run build --workspace @tzukwan/core && npm run build --workspace @tzukwan/skills && npm run build --workspace @tzukwan/research && npm run build --workspace @tzukwan/cli",
+    "dev": "npm run dev --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:integration": "npm run build && node scripts/integration/provider-smoke.mjs && node scripts/integration/runtime-smoke.mjs",
+    "clean": "node -e \"const fs=require('fs');const path=require('path');for (const dir of ['core','skills','research','cli']) { fs.rmSync(path.join('packages',dir,'dist'), { recursive:true, force:true }); }\"",
+    "start": "node bin/tzukwan.mjs",
+    "install:global": "npm install && npm run build && npm install -g ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "esbuild": "^0.24.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "research",
+    "academic",
+    "arxiv",
+    "llm",
+    "gemini",
+    "openai",
+    "science"
+  ],
+  "author": "tzukwan",
+  "license": "Apache-2.0"
+}
