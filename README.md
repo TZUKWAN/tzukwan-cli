@@ -1,4 +1,4 @@
-# 🎓 Tzukwan CLI (子宽学术智能体)
+# 🎓 Tzukwan CLI
 
 > A powerful, AI-driven Command Line & Web Interface and Multi-Agent system dedicated to transparent, verifiably true, and comprehensive academic research.
 >
