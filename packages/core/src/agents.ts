@@ -181,6 +181,12 @@ interface IntentRouteSpec {
 
 const INTENT_ROUTE_SPECS: IntentRouteSpec[] = [
   {
+    // Paper GENERATION tasks should use writing + experiment pipeline, not just literature
+    pattern: /(?:生成论文|generate\s*paper|写论文|写一篇|帮我写|paper\s*generat|撰写论文|自动生成|auto.?generat)/i,
+    primaryAgentIds: ['writing', 'experiment'],
+    collaboratorAgentIds: ['literature', 'experiment', 'review'],
+  },
+  {
     pattern: /(?:选题|topic|research direction|研究方向|novelty|创新点|idea generation|feasibility)/i,
     primaryAgentIds: ['topic'],
     collaboratorAgentIds: ['literature', 'writing'],

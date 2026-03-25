@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join, dirname, basename, extname, resolve } from 'path';
+import { compile as tectonicCompile } from 'node-latex-compiler';
 
 /**
  * LaTeX编译选项
@@ -10,8 +11,8 @@ export interface LaTeXCompileOptions {
   inputFile: string;
   /** 输出目录 */
   outputDir?: string;
-  /** 编译引擎：xelatex（中文推荐）| pdflatex | lualatex */
-  engine?: 'xelatex' | 'pdflatex' | 'lualatex';
+  /** 编译引擎：xelatex（中文推荐）| pdflatex | lualatex | tectonic（推荐，零依赖） */
+  engine?: 'xelatex' | 'pdflatex' | 'lualatex' | 'tectonic';
   /** 编译次数（用于交叉引用） */
   compileTimes?: number;
   /** 是否使用bibtex/biber处理参考文献 */
@@ -44,14 +45,16 @@ export interface LaTeXCompileResult {
  * LaTeX编译器
  *
  * 功能：
- * 1. 调用系统安装的TeX Live编译.tex文件
- * 2. 支持中文（xelatex引擎）
- * 3. 自动处理交叉引用（多次编译）
- * 4. 处理参考文献（bibtex/biber）
- * 5. 错误捕获和报告
+ * 1. 优先使用node-latex-compiler（基于Tectonic，零依赖）
+ * 2. 降级支持系统安装的TeX Live编译.tex文件
+ * 3. 支持中文（xelatex/tectonic引擎）
+ * 4. 自动处理交叉引用（多次编译）
+ * 5. 处理参考文献（bibtex/biber）
+ * 6. 错误捕获和报告
  */
 export class LaTeXCompiler {
   private enginePaths: Map<string, string> = new Map();
+  private useTectonic: boolean = true; // 默认使用Tectonic
 
   /**
    * 查找系统LaTeX引擎路径
@@ -143,8 +146,114 @@ export class LaTeXCompiler {
 
   /**
    * 编译LaTeX文件
+   * 优先使用node-latex-compiler（Tectonic），零依赖
+   * 如果失败则降级到系统LaTeX
    */
   async compile(options: LaTeXCompileOptions): Promise<LaTeXCompileResult> {
+    const startTime = Date.now();
+    const engine = options.engine || 'tectonic'; // 默认使用tectonic
+
+    // 如果明确指定了传统LaTeX引擎，或者Tectonic失败，则使用传统方法
+    if (engine === 'xelatex' || engine === 'pdflatex' || engine === 'lualatex' || !this.useTectonic) {
+      return this.compileWithTraditionalLaTeX(options);
+    }
+
+    // 使用node-latex-compiler（Tectonic）编译
+    return this.compileWithTectonic(options);
+  }
+
+  /**
+   * 使用node-latex-compiler（基于Tectonic）编译LaTeX
+   * 零依赖，自动下载二进制文件
+   */
+  private async compileWithTectonic(options: LaTeXCompileOptions): Promise<LaTeXCompileResult> {
+    const startTime = Date.now();
+    const result: LaTeXCompileResult = {
+      success: false,
+      log: '',
+      errors: [],
+      warnings: [],
+      compileTime: 0
+    };
+
+    // 检查输入文件
+    const inputFile = resolve(options.inputFile);
+    if (!existsSync(inputFile)) {
+      result.errors.push(`输入文件不存在: ${inputFile}`);
+      return result;
+    }
+
+    // 设置输出目录
+    const inputDir = dirname(inputFile);
+    const inputName = basename(inputFile, extname(inputFile));
+    const outputDir = resolve(options.outputDir || inputDir);
+
+    // 确保输出目录存在
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true });
+    }
+
+    try {
+      console.log(`[LaTeXCompiler] 使用node-latex-compiler (Tectonic) 编译: ${inputFile}`);
+
+      // 读取.tex文件内容
+      const texContent = readFileSync(inputFile, 'utf-8');
+
+      // 使用node-latex-compiler编译
+      const tectonicResult = await tectonicCompile({
+        tex: texContent,
+        outputDir: outputDir,
+        outputFile: join(outputDir, `${inputName}.pdf`),
+        onStdout: (data) => {
+          result.log += data + '\n';
+          console.log('[Tectonic]', data.trim());
+        },
+        onStderr: (data) => {
+          const stderr = data + '\n';
+          result.log += stderr;
+          if (data.toLowerCase().includes('warning')) {
+            result.warnings.push(data.trim());
+          } else {
+            result.errors.push(data.trim());
+          }
+          console.warn('[Tectonic]', data.trim());
+        }
+      });
+
+      if (tectonicResult.status === 'success' && tectonicResult.pdfPath) {
+        result.success = true;
+        result.pdfPath = tectonicResult.pdfPath;
+        console.log(`[LaTeXCompiler] ✅ PDF生成成功: ${tectonicResult.pdfPath}`);
+      } else {
+        result.errors.push(`Tectonic编译失败: ${tectonicResult.stderr || tectonicResult.error || '未知错误'}`);
+        console.error(`[LaTeXCompiler] ❌ Tectonic编译失败`);
+      }
+
+      if (tectonicResult.stdout) {
+        result.log += tectonicResult.stdout;
+      }
+      if (tectonicResult.stderr) {
+        result.log += tectonicResult.stderr;
+      }
+
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      result.errors.push(`Tectonic编译异常: ${errMsg}`);
+      console.error(`[LaTeXCompiler] Tectonic异常: ${errMsg}`);
+
+      // 如果Tectonic失败，尝试降级到传统LaTeX
+      console.warn('[LaTeXCompiler] Tectonic失败，尝试降级到传统LaTeX...');
+      return this.compileWithTraditionalLaTeX(options);
+    }
+
+    result.compileTime = Date.now() - startTime;
+    return result;
+  }
+
+  /**
+   * 使用传统LaTeX引擎编译（作为降级方案）
+   */
+  private async compileWithTraditionalLaTeX(options: LaTeXCompileOptions): Promise<LaTeXCompileResult> {
     const startTime = Date.now();
     const engine = options.engine || 'xelatex';
     const compileTimes = options.compileTimes || 2;
@@ -170,8 +279,8 @@ export class LaTeXCompiler {
     const enginePath = await this.detectEngine(engine);
     if (!enginePath) {
       result.errors.push(`未找到LaTeX引擎: ${engine}`);
-      result.errors.push('请确保已安装TeX Live并添加到系统PATH');
-      result.errors.push('常见安装路径: C:\\texlive\\2024\\bin\\win32\\');
+      result.errors.push('建议：使用默认的Tectonic引擎（零依赖），或安装TeX Live');
+      result.errors.push('安装地址: https://tug.org/texlive/');
       return result;
     }
 
@@ -195,6 +304,8 @@ export class LaTeXCompiler {
     ];
 
     try {
+      console.log(`[LaTeXCompiler] 使用传统LaTeX引擎编译: ${engine}`);
+
       // 第一次编译
       result.log += `=== 第1次编译（${engine}）===\n`;
       let cmdResult = await this.execCommand(enginePath, args, { cwd: inputDir, env: options.env });
@@ -233,6 +344,7 @@ export class LaTeXCompiler {
       if (existsSync(pdfPath)) {
         result.success = true;
         result.pdfPath = pdfPath;
+        console.log(`[LaTeXCompiler] ✅ PDF生成成功: ${pdfPath}`);
       } else {
         result.errors.push('PDF文件未生成，请检查编译日志');
       }

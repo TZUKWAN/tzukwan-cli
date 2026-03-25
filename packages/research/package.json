@@ -23,6 +23,7 @@
     "docx": "^9.6.1",
     "fast-xml-parser": "^4.5.0",
     "mathjax-full": "^3.2.1",
+    "node-latex-compiler": "^1.0.5",
     "pdf-parse": "^1.1.1",
     "sharp": "^0.34.5",
     "xml2js": "^0.6.0"

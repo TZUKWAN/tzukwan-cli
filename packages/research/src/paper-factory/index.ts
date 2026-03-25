@@ -521,15 +521,43 @@ export class PaperFactory {
 
     try {
       // Step 5: Export to LaTeX
-      console.log('[generatePaper] Exporting to LaTeX...');
+      console.log('[generatePaper] Exporting to LaTeX with bibliography...');
       texPath = await this.exportToLaTeX(paperPath, paperDir);
 
-      // Step 6: Compile to PDF
-      console.log('[generatePaper] Compiling PDF...');
-      pdfPath = await this.exportToPDF(texPath, paperDir);
+      // Generate bibliography file for LaTeX
+      const bibPath = join(paperDir, 'references.bib');
+      const bibContent = this.generateBibliographyBib(references.slice(0, 20));
+      writeFileSync(bibPath, bibContent, 'utf-8');
+      console.log(`[generatePaper] Generated bibliography file: ${bibPath}`);
+
+      // Step 6: Compile to PDF (使用默认Tectonic引擎，零依赖)
+      console.log('[generatePaper] Compiling PDF with Tectonic (零依赖，自动下载)...');
+      try {
+        pdfPath = await this.exportToPDF(texPath, paperDir);
+        console.log(`[generatePaper] ✅ PDF successfully generated: ${pdfPath}`);
+      } catch (tectonicError) {
+        console.warn(`[generatePaper] Tectonic编译失败，尝试系统LaTeX降级: ${tectonicError instanceof Error ? tectonicError.message : String(tectonicError)}`);
+        try {
+          const fallbackResult = await this.latexCompiler.compile({
+            inputFile: texPath,
+            outputDir: paperDir,
+            engine: 'pdflatex', // 尝试系统pdflatex
+            compileTimes: 2,
+            useBibtex: false,
+          });
+          if (fallbackResult.success && fallbackResult.pdfPath) {
+            pdfPath = fallbackResult.pdfPath;
+            console.log(`[generatePaper] ✅ PDF compiled with system pdflatex fallback: ${pdfPath}`);
+          }
+        } catch {
+          console.warn('[generatePaper] 系统LaTeX也不可用，PDF生成跳过');
+          console.warn('[generatePaper] 论文已以 .md 和 .docx 格式生成，这些格式不依赖LaTeX。');
+        }
+      }
     } catch (error) {
-      console.warn(`[generatePaper] LaTeX/PDF export failed: ${error instanceof Error ? error.message : String(error)}`);
-      // Continue without LaTeX/PDF - they are optional
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.warn(`[generatePaper] LaTeX/PDF export failed: ${errMsg}`);
+      console.warn('[generatePaper] 论文已以 .md 和 .docx 格式生成，这些格式不依赖LaTeX。');
     }
 
     return {
@@ -728,7 +756,7 @@ export class PaperFactory {
       }
     }
 
-    // Convert markdown to LaTeX
+    // Convert markdown to LaTeX with improved reference handling
     const latexContent = this.convertMarkdownToLaTeX(markdownContent, title);
 
     // Ensure output directory exists
@@ -753,7 +781,66 @@ export class PaperFactory {
   }
 
   /**
+   * Generate bibliography file in BibTeX format
+   * @param references Array of literature references
+   * @returns BibTeX file content
+   */
+  private generateBibliographyBib(references: LiteratureReference[]): string {
+    const entries: string[] = [];
+
+    for (let i = 0; i < references.length; i++) {
+      const ref = references[i];
+      const key = `ref${i + 1}`;
+
+      // Format authors
+      const authors = ref.authors && ref.authors.length > 0
+        ? ref.authors.join(' and ')
+        : 'Unknown Author';
+
+      let entry = '';
+
+      // Determine entry type based on available information
+      if (ref.journal || ref.source === 'PubMed') {
+        // Journal article
+        entry = `@article{${key},
+  title = {${this.escapeLatexChars(ref.title)}},
+  author = {${authors}},
+  year = {${ref.year || ref.published?.slice(0, 4) || 'n.d.'}},
+  journal = {${ref.journal || 'Unknown Journal'}}${ref.doi ? `,
+  doi = {${ref.doi}}` : ''}${ref.url ? `,
+  url = {${ref.url}}` : ''}
+}`;
+      } else if (ref.arxivId) {
+        // arXiv preprint
+        entry = `@misc{${key},
+  title = {${this.escapeLatexChars(ref.title)}},
+  author = {${authors}},
+  year = {${ref.year || ref.published?.slice(0, 4) || 'n.d.'}},
+  eprint = {${ref.arxivId}},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.CL}${ref.url ? `,
+  url = {${ref.url}}` : ''}
+}`;
+      } else {
+        // Generic misc entry
+        entry = `@misc{${key},
+  title = {${this.escapeLatexChars(ref.title)}},
+  author = {${authors}},
+  year = {${ref.year || ref.published?.slice(0, 4) || 'n.d.'}}${ref.url ? `,
+  url = {${ref.url}}` : ''}${ref.source ? `,
+  howpublished = {${ref.source}}` : ''}
+}`;
+      }
+
+      entries.push(entry);
+    }
+
+    return entries.join('\n\n');
+  }
+
+  /**
    * Convert markdown content to LaTeX format
+   * 改进版：增强段落化、引用处理和学术表达
    * @param markdown Markdown content
    * @param title Paper title
    * @returns LaTeX content
@@ -761,37 +848,46 @@ export class PaperFactory {
   private convertMarkdownToLaTeX(markdown: string, title: string): string {
     let latex = markdown;
 
-    // Escape special LaTeX characters
-    latex = this.escapeLatexChars(latex);
+    // IMPORTANT: Do NOT escape LaTeX chars globally first — it destroys LaTeX commands.
+    // Instead, convert markdown structures to LaTeX first, then escape only plain text.
+
+    // Remove title line (handled separately in document template)
+    latex = latex.replace(/^#\s+(.+)$/gm, '');
+
+    // Convert code blocks FIRST (preserve content as-is inside lstlisting)
+    const codeBlocks: string[] = [];
+    latex = latex.replace(/```(\w+)?\n([\s\S]*?)```/g, (_match, lang, code) => {
+      const language = lang || 'text';
+      const placeholder = `%%CODEBLOCK_${codeBlocks.length}%%`;
+      codeBlocks.push(`\\begin{lstlisting}[language=${language}]\n${code}\\end{lstlisting}`);
+      return placeholder;
+    });
+
+    // Convert display math blocks ($$...$$) — preserve as-is
+    const mathBlocks: string[] = [];
+    latex = latex.replace(/\$\$([\s\S]*?)\$\$/g, (_match, math) => {
+      const placeholder = `%%MATHBLOCK_${mathBlocks.length}%%`;
+      mathBlocks.push(`\\[\n${math.trim()}\n\\]`);
+      return placeholder;
+    });
 
     // Convert markdown headers to LaTeX sections
     latex = latex.replace(/^###\s+(.+)$/gm, '\\subsubsection{$1}');
-    latex = latex.replace(/^##\s+(\d+\.\s+)?(.+)$/gm, '\\section{$2}');
-    latex = latex.replace(/^#\s+(.+)$/gm, ''); // Remove title (handled separately)
+    latex = latex.replace(/^##\s+(?:\d+\.\s*)?(.+)$/gm, '\\section{$1}');
 
     // Convert bold and italic
     latex = latex.replace(/\*\*\*(.+?)\*\*\*/g, '\\textbf{\\textit{$1}}');
     latex = latex.replace(/\*\*(.+?)\*\*/g, '\\textbf{$1}');
-    latex = latex.replace(/\*(.+?)\*/g, '\\textit{$1}');
+    latex = latex.replace(/(?<!\\)\*(.+?)\*/g, '\\textit{$1}');
 
-    // Convert inline math ($...$) - preserve existing LaTeX math
-    latex = latex.replace(/(?<!\$)\$([^$]+)\$(?!\$)/g, '$$$1$$');
-
-    // Convert display math ($$...$$) - already in correct format
+    // Convert inline math ($...$) — preserve existing
+    latex = latex.replace(/(?<!\$)\$([^$]+)\$(?!\$)/g, '\$$$1\$$');
 
     // Convert markdown tables to LaTeX tables
     latex = this.convertMarkdownTablesToLatex(latex);
 
-    // Convert markdown lists
+    // Convert markdown lists to LaTeX lists
     latex = this.convertMarkdownListsToLatex(latex);
-
-    // Convert code blocks
-    latex = latex.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
-      const language = lang || 'text';
-      return `\\begin{lstlisting}[language=${language}]
-${code}
-\\end{lstlisting}`;
-    });
 
     // Convert inline code
     latex = latex.replace(/`([^`]+)`/g, '\\texttt{$1}');
@@ -799,17 +895,56 @@ ${code}
     // Convert markdown links
     latex = latex.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '\\href{$2}{$1}');
 
-    // Handle citations [1], [2, 3], etc.
-    latex = latex.replace(/\[(\d+(?:,\s*\d+)*)\]/g, '\\cite{$1}');
+    // 改进引用处理：[1], [2, 3] 等转换为 \cite{ref1}, \cite{ref2,ref3}
+    latex = latex.replace(/\[(\d+)\]/g, '\\cite{ref$1}');
+    latex = latex.replace(/\[(\d+),\s*(\d+)\]/g, '\\cite{ref$1,ref$2}');
+    latex = latex.replace(/\[(\d+),\s*(\d+),\s*(\d+)\]/g, '\\cite{ref$1,ref$2,ref$3}');
+    latex = latex.replace(/\[(\d+)(?:,\s*\d+){3,}\]/g, (match) => {
+      const nums = match.match(/\d+/g);
+      if (nums) {
+        return '\\cite{' + nums.map(n => `ref${n}`).join(',') + '}';
+      }
+      return match;
+    });
 
-    // Convert blockquotes
-    latex = latex.replace(/^>\s+(.+)$/gm, '\\begin{quote}$1\\end{quote}');
+    // Convert blockquotes to emphasized paragraphs
+    latex = latex.replace(/^>\s+(.+)$/gm, '\\begin{quote}\n$1\n\\end{quote}');
 
     // Handle horizontal rules
-    latex = latex.replace(/^---+$/gm, '\\hrule\\vspace{0.5em}');
+    latex = latex.replace(/^---+$/gm, '\\vspace{1em}\\hrule\\vspace{1em}');
 
-    // Clean up multiple newlines
-    latex = latex.replace(/\n{3,}/g, '\n\n');
+    // 改进段落化处理：将多个连续换行转换为段落分隔
+    // 保持段落间距，确保LaTeX正确渲染段落
+    latex = latex.replace(/\n{3,}/g, '\n\n\n');
+
+    // Escape remaining special LaTeX characters in plain text only
+    // (skip lines that already contain LaTeX commands)
+    latex = latex.split('\n').map(line => {
+      // Skip lines that are LaTeX commands, placeholders, or empty
+      if (line.trim().startsWith('\\') ||
+          line.includes('%%CODEBLOCK_') ||
+          line.includes('%%MATHBLOCK_') ||
+          line.includes('\\begin{') ||
+          line.includes('\\end{') ||
+          line.includes('\\item') ||
+          line.trim() === '') {
+        return line;
+      }
+      // Selective escaping: only escape & % # _ in plain text lines
+      return line
+        .replace(/(?<!\\)&/g, '\\&')
+        .replace(/(?<!\\)%/g, '\\%')
+        .replace(/(?<!\\)#/g, '\\#')
+        .replace(/(?<!\\)_/g, '\\_');
+    }).join('\n');
+
+    // Restore code blocks and math blocks
+    for (let i = 0; i < codeBlocks.length; i++) {
+      latex = latex.replace(`%%CODEBLOCK_${i}%%`, codeBlocks[i]);
+    }
+    for (let i = 0; i < mathBlocks.length; i++) {
+      latex = latex.replace(`%%MATHBLOCK_${i}%%`, mathBlocks[i]);
+    }
 
     // Build complete LaTeX document
     return this.buildLatexDocument(title, latex);
@@ -895,6 +1030,7 @@ ${items.map(item => `  \\item ${item}`).join('\n')}
 
   /**
    * Build complete LaTeX document with ctexart class
+   * 改进版：增强段落化、学术表达和参考文献支持
    */
   private buildLatexDocument(title: string, content: string): string {
     return `\\documentclass[12pt,a4paper]{ctexart}
@@ -911,8 +1047,9 @@ ${items.map(item => `  \\item ${item}`).join('\n')}
 \\usepackage{hyperref}
 % 代码高亮
 \\usepackage{listings,xcolor}
-% 参考文献
+% 参考文献 - 改进为使用GB/T 7714标准
 \\usepackage[numbers,sort&compress]{natbib}
+\\bibliographystyle{gbt7714-numerical}
 
 % 代码样式设置
 \\lstset{
@@ -936,6 +1073,13 @@ ${items.map(item => `  \\item ${item}`).join('\n')}
 \\setsansfont{Arial}
 \\setmonofont{Courier New}
 
+% 段落格式: 首行缩进2字符，段间距
+\\setlength{\\parindent}{2em}
+\\setlength{\\parskip}{0.5em}
+
+% 段落间距优化：确保段落间有明显间距
+\\setlength{\\parskip}{0.8ex plus 0.2ex minus 0.2ex}
+
 % 标题格式
 \\ctexset{
   section = {
@@ -947,8 +1091,17 @@ ${items.map(item => `  \\item ${item}`).join('\n')}
     format = \\zihao{4}\\heiti\\bfseries,
     beforeskip = 0.5em,
     afterskip = 0.3em
+  },
+  subsubsection = {
+    format = \\zihao{-4}\\heiti\\bfseries,
+    beforeskip = 0.3em,
+    afterskip = 0.2em
   }
 }
+
+% 禁止孤行和寡行
+\\widowpenalty=10000
+\\clubpenalty=10000
 
 \\begin{document}
 
@@ -966,8 +1119,11 @@ ${items.map(item => `  \\item ${item}`).join('\n')}
 \\tableofcontents
 \\newpage
 
-% 正文
+% 正文 - 强调段落化写作
 ${content}
+
+% 参考文献 - 使用标准格式
+\\bibliography{references}
 
 \\end{document}
 `;
@@ -975,26 +1131,29 @@ ${content}
 
   /**
    * Compile LaTeX file to PDF
+   * 优先使用Tectonic（零依赖），失败时自动降级
    * @param texPath Path to the .tex file
    * @param outputDir Directory to save the PDF
    * @returns Path to the generated PDF
    */
   async exportToPDF(texPath: string, outputDir: string): Promise<string> {
     console.log(`[exportToPDF] Starting PDF compilation for: ${texPath}`);
+    console.log(`[exportToPDF] 默认使用Tectonic引擎（零依赖，自动下载）`);
 
     // Ensure output directory exists
     if (!existsSync(outputDir)) {
       mkdirSync(outputDir, { recursive: true });
     }
 
-    // Compile using LaTeXCompiler
+    // Compile using LaTeXCompiler with default tectonic engine
     const compileResult = await this.latexCompiler.compile({
       inputFile: texPath,
       outputDir: outputDir,
-      engine: 'xelatex',
+      // 不指定engine，使用默认的tectonic（零依赖）
       compileTimes: 2,
       useBibtex: false,
     });
+
     const compileLogPath = join(outputDir, 'latex-compile.log');
     try {
       writeFileSync(compileLogPath, compileResult.log, 'utf-8');
@@ -1014,7 +1173,7 @@ ${content}
       throw new Error('PDF compilation succeeded but no PDF path was returned');
     }
 
-    console.log(`[exportToPDF] PDF successfully generated: ${compileResult.pdfPath}`);
+    console.log(`[exportToPDF] ✅ PDF successfully generated: ${compileResult.pdfPath}`);
     return compileResult.pdfPath;
   }
 

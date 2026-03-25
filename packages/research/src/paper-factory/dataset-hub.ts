@@ -141,6 +141,16 @@ export class DatasetHub {
       }
     }
 
+    // 强制使用真实数据集：如果没有找到匹配的数据集，抛出错误而不是使用模板
+    if (combined.length === 0) {
+      throw new Error(
+        `未找到与主题"${topic}"和领域"${field}"相关的真实数据集。` +
+        `这违反了TZUKWAN规范中"必须使用真实数据集"的要求。` +
+        `请：1) 换一个有数据集支持的选题；2) 或手动提供真实数据集URL。` +
+        `绝对禁止编造或模拟数据。`
+      );
+    }
+
     const datasets = combined.slice(0, 15);
 
     const manifest = {
